@@ -1,0 +1,10 @@
+[package]
+name = 'foot_fantasy'
+version = '1.0.0'
+[dependencies.AptosTokenObjects]
+git = 'https://github.com/aptos-labs/aptos-core.git'
+rev = 'aptos-cli-v2.0.0'
+subdir = 'aptos-move/framework/aptos-token-objects'
+[addresses]
+rtmtree = '0xBADC0DE'
+admin = '0xB00'
