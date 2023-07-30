@@ -9,12 +9,15 @@
 module rtmtree::foot_fantasy {
     use std::signer;
     use std::vector;
+    use aptos_framework::coin;
+    use aptos_framework::aptos_coin::{Self, AptosCoin};
     use aptos_framework::account::{Self, SignerCapability};
     use aptos_framework::event::{Self, EventHandle};
     use aptos_framework::timestamp;
     use rtmtree::foot_fantasy_events::{
         CreateTeamEvent,
-        AnnounceResultEvent
+        AnnounceResultEvent,
+        ClaimRewardEvent
     };
 
     /////////////////////////////
@@ -26,6 +29,10 @@ module rtmtree::foot_fantasy {
     const ERROR_LENGTHS_NOT_EQUAL: u64 = 2;
     const ERROR_PLAYER_DOES_NOT_EXIST: u64 = 3;
     const ERROR_DUPLICATE_PLAYER_ID: u64 = 4;
+    const ERROR_RESULT_ALREADY_ANNOUNCED: u64 = 5;
+    const ERROR_RESULT_IS_NOT_ANNOUNCED: u64 = 6;
+    const ERROR_REWARD_IS_ALREADY_CLAIMED: u64 = 7;
+    const ERROR_NOT_ENOUGH_BALANCE_TO_REWARD: u64 = 8;
 
     ///////////////////////////////
     // PDA Seed //// DO NOT EDIT //
@@ -39,6 +46,7 @@ module rtmtree::foot_fantasy {
 
     const POINT_PER_GOAL: u64 = 6;
     const POINT_PER_ASSIST: u64 = 3;
+    const REWARD_TOP10: u64 = 2000000;
 
     /////////////////////////////////
     // PLAYER NAMES // DO NOT EDIT //
@@ -67,6 +75,8 @@ module rtmtree::foot_fantasy {
         player_list: vector<Player>,
         // Team List
         team_list: vector<Team>,
+        // is result announced
+        is_result_announced: bool,
         // Events
         events: Event
     }
@@ -90,6 +100,7 @@ module rtmtree::foot_fantasy {
         player3_id: u64,
         points: u64,
         rank: u64,
+        is_reward_claimed: bool,
     }
 
     /*
@@ -98,6 +109,7 @@ module rtmtree::foot_fantasy {
     struct Event has store {
         create_team_events: EventHandle<CreateTeamEvent>,
         announce_result_events: EventHandle<AnnounceResultEvent>,
+        claim_reward_events: EventHandle<ClaimRewardEvent>,
     }
 
     /////////////////////////////
@@ -113,7 +125,10 @@ module rtmtree::foot_fantasy {
         assert_signer_is_admin(admin);
 
         // TODO: Create resource account
-        let (_, sign_cap) = account::create_resource_account(admin,SEED);
+        let (resource_signer, sign_cap) = account::create_resource_account(admin,SEED);
+
+        // TODO: Register AptosCoin to resource
+        coin::register<AptosCoin>(&resource_signer);
 
         // TODO: Create player_list from PLAYER_NAMES with incrementing ids
         let player_list = vector::empty();
@@ -132,9 +147,11 @@ module rtmtree::foot_fantasy {
             cap: move sign_cap,
             player_list: move player_list,
             team_list: vector::empty(),
+            is_result_announced: false,
             events: Event {
                 create_team_events: account::new_event_handle<CreateTeamEvent>(admin),
                 announce_result_events: account::new_event_handle<AnnounceResultEvent>(admin),
+                claim_reward_events: account::new_event_handle<ClaimRewardEvent>(admin),
             }
         };
         move_to<State>(move admin,move instance);
@@ -156,6 +173,9 @@ module rtmtree::foot_fantasy {
         // TODO: Assert that state is initialized
         assert_state_initialized();
 
+        // TODO: Assert that the result is not announced yet
+        assert_result_not_announced();
+
         // TODO: Assert that all players exist
         assert_player_exists(player1_id);
         assert_player_exists(player2_id);
@@ -163,6 +183,9 @@ module rtmtree::foot_fantasy {
 
         // TODO: Assert that there is no any duplicated player_id
         assert_no_duplicated_player_id(player1_id, player2_id, player3_id);
+
+        // TODO: Register AptosCoin in case the team win some reward
+        coin::register<AptosCoin>(account);
 
         // TODO: Create a team and add to State , use 0 as default for points and rank
         let instance = borrow_global_mut<State>(@admin);
@@ -174,7 +197,8 @@ module rtmtree::foot_fantasy {
             player2_id,
             player3_id,
             points: 0,
-            rank: 0
+            rank: 0,
+            is_reward_claimed: false,
         };
         vector::push_back(&mut instance.team_list, move team);
 
@@ -210,12 +234,15 @@ module rtmtree::foot_fantasy {
         // TODO: Assert the signer is the admin
         assert_signer_is_admin(admin);
 
+        // TODO: Assert that the result is not announced yet
+        assert_result_not_announced();
+
         // TODO: For all teams in team_list
         //      1. calculate the team's point
         //      2. update the team's point
         //      3. update the team's rank
         //          if points are equal, consider the team with lower team_id as higher rank (the team is created earlier)
-        //      4. emit the event
+        //      4. emit AnnounceResultEvent event
         let instance = borrow_global_mut<State>(@admin);
 
         //calculate and update points
@@ -265,7 +292,7 @@ module rtmtree::foot_fantasy {
             i = move i + 1;
         };
 
-        //emit event
+        //emit AnnounceResultEvent event
         event::emit_event<AnnounceResultEvent>(
             &mut instance.events.announce_result_events,
             rtmtree::foot_fantasy_events::new_announce_result_event(
@@ -274,6 +301,9 @@ module rtmtree::foot_fantasy {
                 timestamp::now_seconds()
             )
         );
+
+        // TODO: Set is_result_announced to true
+        instance.is_result_announced = true;
         move instance;
     }
 
@@ -287,7 +317,7 @@ module rtmtree::foot_fantasy {
         // TODO: Assert that a length if player_goals is equal to a length of player_assists
         assert_vectors_have_equal_length<u64, u64>(player_goals, player_assists);
 
-        //TODO: loop all players and calculate points for each player
+        // TODO: loop all players and calculate points for each player
         let i = 0;
         let player_points = vector::empty();
         while (i < vector::length(player_goals)) {
@@ -301,6 +331,52 @@ module rtmtree::foot_fantasy {
             i = move i + 1;
         };
         player_points
+    }
+
+    public entry fun claim_reward(
+        account: &signer,
+        team_id: u64,
+    ) acquires State {
+        // TODO: Assert that state is initialized
+        assert_state_initialized();
+
+        // TODO: Assert that the result is announced
+        assert_result_is_announced();
+
+        // TODO: Assert that this team_id is not claimed yet
+        assert_reward_is_not_claimed(team_id);
+
+        // TODO: Mark that this team is already claimed
+        let instance = borrow_global_mut<State>(@admin);
+        let team = vector::borrow_mut(&mut instance.team_list, team_id);
+        team.is_reward_claimed = true;
+
+        // TODO: Get how much reward this team should get
+        let reward = 0;
+        let rank = team.rank;
+        if (rank >= 1 && rank <=10){
+            reward = REWARD_TOP10;
+        };
+
+        // TODO: Transfer reward if reward is more than 0
+        // , assert that there is enough reward in the resource with `assert_contract_has_enought_apt` beforehand
+        // TODO: Emit ClaimRewardEvent event
+        if (reward > 0){
+            let resource_signer = &account::create_signer_with_capability(&instance.cap);
+            assert_contract_has_enought_apt(signer::address_of(resource_signer),REWARD_TOP10);
+
+            coin::transfer<AptosCoin>(resource_signer, signer::address_of(account), reward);
+            event::emit_event(
+                &mut instance.events.claim_reward_events,
+                rtmtree::foot_fantasy_events::new_claim_reward_event(
+                    signer::address_of(account),
+                    team_id,
+                    move reward,
+                    timestamp::now_seconds()
+                )
+            );
+        };
+
     }
 
     ///////////////////////////
@@ -333,6 +409,28 @@ module rtmtree::foot_fantasy {
             player1_id != player2_id && player1_id != player3_id && player2_id != player3_id,
             ERROR_DUPLICATE_PLAYER_ID
         );
+    }
+
+    inline fun assert_result_not_announced() acquires State {
+        // TODO: Assert that is_result_announced in State is false
+        let instance = borrow_global_mut<State>(@admin);
+        assert!(!instance.is_result_announced, ERROR_RESULT_ALREADY_ANNOUNCED);
+    }
+
+    inline fun assert_result_is_announced() acquires State {
+        // TODO: Assert that is_result_announced in State is false
+        let instance = borrow_global_mut<State>(@admin);
+        assert!(instance.is_result_announced, ERROR_RESULT_IS_NOT_ANNOUNCED);
+    }
+
+    inline fun assert_reward_is_not_claimed(team_id: u64) acquires State {
+        // TODO: Assert that is_reward_claimed of this team_id is false
+        let instance = borrow_global_mut<State>(@admin);
+        assert!(!vector::borrow(&instance.team_list, move team_id).is_reward_claimed, ERROR_REWARD_IS_ALREADY_CLAIMED);
+    }
+
+    inline fun assert_contract_has_enought_apt(resource_account_address: address ,minimum_balance: u64) {
+        assert!(coin::balance<AptosCoin>(resource_account_address) >= minimum_balance, ERROR_NOT_ENOUGH_BALANCE_TO_REWARD);
     }
 
     ////////////////////////////
@@ -383,6 +481,8 @@ module rtmtree::foot_fantasy {
         assert!(vector::borrow(&state.team_list, 0).player1_id == 0,1);
         assert!(vector::borrow(&state.team_list, 0).player2_id == 1,2);
         assert!(vector::borrow(&state.team_list, 0).player3_id == 2,3);
+        assert!(event::counter(&state.events.create_team_events) == 1, 4);
+
     }
 
     #[test]
@@ -473,10 +573,12 @@ module rtmtree::foot_fantasy {
         assert!(vector::borrow(&state.team_list, 3).player1_id == 3,14);
         assert!(vector::borrow(&state.team_list, 3).player2_id == 4,15);
         assert!(vector::borrow(&state.team_list, 3).player3_id == 5,16);
+        assert!(event::counter(&state.events.create_team_events) == 4, 17);
+
     }
 
     #[test]
-    fun test_create_teams_and_announce() acquires State {
+    fun test_announce() acquires State {
         let aptos_framework = account::create_account_for_test(@aptos_framework);
         timestamp::set_time_has_started_for_testing(&aptos_framework);
 
@@ -531,6 +633,91 @@ module rtmtree::foot_fantasy {
         assert!(vector::borrow(&state.team_list, 1).rank == 4, 6);
         assert!(vector::borrow(&state.team_list, 2).rank == 2, 7);
         assert!(vector::borrow(&state.team_list, 3).rank == 3, 8);
+        assert!(event::counter(&state.events.create_team_events) == 4, 9);
+        assert!(event::counter(&state.events.announce_result_events) == 1, 10);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = ERROR_RESULT_ALREADY_ANNOUNCED, location = Self)]
+    fun test_create_team_after_announced() acquires State {
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        let admin = account::create_account_for_test(@admin);
+        init(&admin);
+
+        let account = account::create_account_for_test(@0xCAFE);
+        let player1_id = 0;
+        let player2_id = 1;
+        let player3_id = 2;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let account = account::create_account_for_test(@0xDAD);
+        let player1_id = 0;
+        let player2_id = 2;
+        let player3_id = 3;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let account = account::create_account_for_test(@0xC0FFEE);
+        let player1_id = 3;
+        let player2_id = 4;
+        let player3_id = 5;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let player1_id = 3;
+        let player2_id = 4;
+        let player3_id = 5;
+        create_team(&account, player1_id, player2_id, player3_id);
+
+        let player_goals = vector[
+            0,
+            1,
+            1,
+            0,
+            0,
+            1,
+        ];
+        let player_assists = vector[
+            1,
+            1,
+            0,
+            0,
+            1,
+            1,
+        ];
+        announce_with_stats(&admin, player_goals, player_assists);
+
+        let player1_id = 3;
+        let player2_id = 4;
+        let player3_id = 5;
+        create_team(&account, player1_id, player2_id, player3_id);
+    }
+
+    #[test]
+    fun test_announce_no_team() acquires State {
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        let admin = account::create_account_for_test(@admin);
+        init(&admin);
+
+        let player_goals = vector[
+            0,
+            1,
+            1,
+            0,
+            0,
+            1,
+        ];
+        let player_assists = vector[
+            1,
+            1,
+            0,
+            0,
+            1,
+            1,
+        ];
+        announce_with_stats(&admin, player_goals, player_assists);
+
+        let state = borrow_global<State>(@admin);
+        assert!(event::counter(&state.events.announce_result_events) == 1, 10);
     }
 
     #[test]
@@ -565,5 +752,276 @@ module rtmtree::foot_fantasy {
         assert!(*vector::borrow(&player_points, 3) == 0, 3);
         assert!(*vector::borrow(&player_points, 4) == 3, 4);
         assert!(*vector::borrow(&player_points, 5) == 6, 5);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = ERROR_RESULT_ALREADY_ANNOUNCED, location = Self)]
+    fun test_announce_double() acquires State {
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        let admin = account::create_account_for_test(@admin);
+        init(&admin);
+
+        let player_goals = vector[
+            0,
+            1,
+            1,
+            0,
+            0,
+            1,
+        ];
+        let player_assists = vector[
+            1,
+            1,
+            0,
+            0,
+            1,
+            1,
+        ];
+        announce_with_stats(&admin, player_goals, player_assists);
+        announce_with_stats(&admin, player_goals, player_assists);
+    }
+
+    #[test]
+    fun test_claimed_top10_success() acquires State {
+
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+        let (burn_cap, mint_cap) = aptos_coin::initialize_for_test(&aptos_framework);
+
+        let admin = account::create_account_for_test(@admin);
+        init(&admin);
+
+        let resource_signer_address = account::create_resource_address(&signer::address_of(&admin),SEED);
+        aptos_coin::mint(&aptos_framework, resource_signer_address, REWARD_TOP10 * 10);
+        coin::destroy_burn_cap(burn_cap);
+        coin::destroy_mint_cap(mint_cap);
+
+        let account = account::create_account_for_test(@0xCAFE);
+        let player1_id = 0;
+        let player2_id = 1;
+        let player3_id = 2;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let account = account::create_account_for_test(@0xDAD);
+        let player1_id = 0;
+        let player2_id = 2;
+        let player3_id = 3;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let account = account::create_account_for_test(@0xC0FFEE);
+        let player1_id = 3;
+        let player2_id = 4;
+        let player3_id = 5;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let player1_id = 3;
+        let player2_id = 4;
+        let player3_id = 5;
+        create_team(&account, player1_id, player2_id, player3_id);
+
+        let player_goals = vector[
+            0,
+            1,
+            1,
+            0,
+            0,
+            1,
+        ];
+        let player_assists = vector[
+            1,
+            1,
+            0,
+            0,
+            1,
+            1,
+        ];
+
+        announce_with_stats(&admin, player_goals, player_assists);
+
+        claim_reward(&account,3);
+        assert!(coin::balance<AptosCoin>(signer::address_of(&account)) == REWARD_TOP10, 0);
+        let state = borrow_global<State>(signer::address_of(&admin));
+        assert!(event::counter(&state.events.claim_reward_events) == 1, 0);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = ERROR_REWARD_IS_ALREADY_CLAIMED, location = Self)]
+    fun test_claimed_double() acquires State {
+
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+        let (burn_cap, mint_cap) = aptos_coin::initialize_for_test(&aptos_framework);
+
+        let admin = account::create_account_for_test(@admin);
+        init(&admin);
+
+        let resource_signer_address = account::create_resource_address(&signer::address_of(&admin),SEED);
+        aptos_coin::mint(&aptos_framework, resource_signer_address, REWARD_TOP10 * 10);
+        coin::destroy_burn_cap(burn_cap);
+        coin::destroy_mint_cap(mint_cap);
+
+        let account = account::create_account_for_test(@0xCAFE);
+        let player1_id = 0;
+        let player2_id = 1;
+        let player3_id = 2;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let account = account::create_account_for_test(@0xDAD);
+        let player1_id = 0;
+        let player2_id = 2;
+        let player3_id = 3;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let account = account::create_account_for_test(@0xC0FFEE);
+        let player1_id = 3;
+        let player2_id = 4;
+        let player3_id = 5;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let player1_id = 3;
+        let player2_id = 4;
+        let player3_id = 5;
+        create_team(&account, player1_id, player2_id, player3_id);
+
+        let player_goals = vector[
+            0,
+            1,
+            1,
+            0,
+            0,
+            1,
+        ];
+        let player_assists = vector[
+            1,
+            1,
+            0,
+            0,
+            1,
+            1,
+        ];
+
+        announce_with_stats(&admin, player_goals, player_assists);
+
+        claim_reward(&account,3);
+        claim_reward(&account,3);
+    }
+
+    #[test]
+    fun test_claimed_not_in_top10_success() acquires State {
+
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+        let (burn_cap, mint_cap) = aptos_coin::initialize_for_test(&aptos_framework);
+
+        let admin = account::create_account_for_test(@admin);
+        init(&admin);
+
+        let resource_signer_address = account::create_resource_address(&signer::address_of(&admin),SEED);
+        aptos_coin::mint(&aptos_framework, resource_signer_address, REWARD_TOP10 * 10);
+        coin::destroy_burn_cap(burn_cap);
+        coin::destroy_mint_cap(mint_cap);
+
+        let account = account::create_account_for_test(@0xCAFE);
+        let player1_id = 0;
+        let player2_id = 1;
+        let player3_id = 2;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let account = account::create_account_for_test(@0xDAD);
+        let player1_id = 0;
+        let player2_id = 2;
+        let player3_id = 3;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let account = account::create_account_for_test(@0xC0FFEE);
+        let player1_id = 3;
+        let player2_id = 4;
+        let player3_id = 5;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let player1_id = 3;
+        let player2_id = 4;
+        let player3_id = 5;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let player1_id = 3;
+        let player2_id = 4;
+        let player3_id = 5;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let player1_id = 3;
+        let player2_id = 4;
+        let player3_id = 5;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let player1_id = 3;
+        let player2_id = 4;
+        let player3_id = 5;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let player1_id = 3;
+        let player2_id = 4;
+        let player3_id = 5;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let player1_id = 3;
+        let player2_id = 4;
+        let player3_id = 5;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let player1_id = 3;
+        let player2_id = 4;
+        let player3_id = 5;
+        create_team(&account, player1_id, player2_id, player3_id);
+
+        let not_win_account = account::create_account_for_test(@0xDEADBEEF);
+        let player1_id = 0;
+        let player2_id = 3;
+        let player3_id = 4;
+        create_team(&not_win_account, player1_id, player2_id, player3_id);
+
+        let player_goals = vector[
+            0,
+            1,
+            1,
+            0,
+            0,
+            1,
+        ];
+        let player_assists = vector[
+            1,
+            1,
+            0,
+            0,
+            1,
+            1,
+        ];
+
+        announce_with_stats(&admin, player_goals, player_assists);
+
+        claim_reward(&not_win_account,10);
+        assert!(coin::balance<AptosCoin>(signer::address_of(&not_win_account)) == 0, 0);
+        let state = borrow_global<State>(signer::address_of(&admin));
+        assert!(event::counter(&state.events.claim_reward_events) == 0, 0);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = ERROR_RESULT_IS_NOT_ANNOUNCED, location = Self)]
+    fun test_claimed_before_result_announced() acquires State {
+
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        let admin = account::create_account_for_test(@admin);
+        init(&admin);
+
+        let account = account::create_account_for_test(@0xCAFE);
+        let player1_id = 0;
+        let player2_id = 1;
+        let player3_id = 2;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let account = account::create_account_for_test(@0xDAD);
+        let player1_id = 0;
+        let player2_id = 2;
+        let player3_id = 3;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let account = account::create_account_for_test(@0xC0FFEE);
+        let player1_id = 3;
+        let player2_id = 4;
+        let player3_id = 5;
+        create_team(&account, player1_id, player2_id, player3_id);
+        let player1_id = 3;
+        let player2_id = 4;
+        let player3_id = 5;
+        create_team(&account, player1_id, player2_id, player3_id);
+
+        claim_reward(&account,3);
     }
 }
