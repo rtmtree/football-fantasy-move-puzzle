@@ -15,6 +15,13 @@ module rtmtree::foot_fantasy_events {
         timestamp: u64
     }
 
+    struct ClaimRewardEvent has store, drop {
+        owner: address,
+        team_id: u64,
+        reward: u64,
+        timestamp: u64
+    }
+
     public fun new_create_team_event(
         owner: address,
         team_id: u64,
@@ -44,4 +51,19 @@ module rtmtree::foot_fantasy_events {
             timestamp
         }
     }
+
+    public fun new_claim_reward_event(
+        owner: address,
+        team_id: u64,
+        reward: u64,
+        timestamp: u64
+    ): ClaimRewardEvent {
+        ClaimRewardEvent {
+            owner,
+            team_id,
+            reward,
+            timestamp
+        }
+    }
+
 }
