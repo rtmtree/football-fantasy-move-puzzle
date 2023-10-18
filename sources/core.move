@@ -10,15 +10,19 @@ module rtmtree::foot_fantasy {
     use std::signer;
     use std::vector;
     use aptos_framework::coin;
-    use aptos_framework::aptos_coin::{Self, AptosCoin};
-    use aptos_framework::account::{Self, SignerCapability};
-    use aptos_framework::event::{Self, EventHandle};
     use aptos_framework::timestamp;
+    use aptos_std::simple_map::{Self, SimpleMap};
+    use aptos_framework::aptos_coin::{AptosCoin};
+    use aptos_framework::event::{Self, EventHandle};
+    use aptos_framework::account::{Self, SignerCapability};
     use rtmtree::foot_fantasy_events::{
         CreateTeamEvent,
         AnnounceResultEvent,
         ClaimRewardEvent
     };
+
+    #[test_only]
+    use aptos_framework::aptos_coin::{Self};
 
     /////////////////////////////
     // ERRORS //// DO NOT EDIT //
@@ -38,7 +42,7 @@ module rtmtree::foot_fantasy {
     // PDA Seed //// DO NOT EDIT //
     ///////////////////////////////
 
-    const SEED: vector<u8> = b"RTMTREE_TO_OVERMIND";
+    const SEED: vector<u8> = b"RTMTREE_SPORT_FANTASY";
 
     //////////////////////////////////////////////
     // POINT PER ACTION SETTINGS // DO NOT EDIT //
@@ -46,6 +50,11 @@ module rtmtree::foot_fantasy {
 
     const POINT_PER_GOAL: u64 = 6;
     const POINT_PER_ASSIST: u64 = 3;
+
+    /////////////////////////////////
+    // OTHER PARAMS // DO NOT EDIT //
+    /////////////////////////////////
+
     const REWARD_TOP10: u64 = 2000000;
 
     /////////////////////////////////
@@ -77,6 +86,10 @@ module rtmtree::foot_fantasy {
         team_list: vector<Team>,
         // is result announced
         is_result_announced: bool,
+        // ticket price
+        ticket_price: u64,
+        // reward mapper for each rank
+        reward_mapper: SimpleMap<u64,u64>,
         // Events
         events: Event
     }
@@ -142,19 +155,21 @@ module rtmtree::foot_fantasy {
             i = move i + 1;
         };
 
-        // TODO: Create State instance and move it to the admin
+        // TODO: Create State instance and move it to the resource_signer
         let instance = State {
             cap: move sign_cap,
             player_list: move player_list,
             team_list: vector::empty(),
             is_result_announced: false,
+            ticket_price: 0,
+            reward_mapper: simple_map::create(),
             events: Event {
-                create_team_events: account::new_event_handle<CreateTeamEvent>(admin),
-                announce_result_events: account::new_event_handle<AnnounceResultEvent>(admin),
-                claim_reward_events: account::new_event_handle<ClaimRewardEvent>(admin),
+                create_team_events: account::new_event_handle<CreateTeamEvent>(&resource_signer),
+                announce_result_events: account::new_event_handle<AnnounceResultEvent>(&resource_signer),
+                claim_reward_events: account::new_event_handle<ClaimRewardEvent>(&resource_signer),
             }
         };
-        move_to<State>(move admin,move instance);
+        move_to<State>(&move resource_signer,move instance);
     }
 
     /*
@@ -188,7 +203,7 @@ module rtmtree::foot_fantasy {
         coin::register<AptosCoin>(account);
 
         // TODO: Create a team and add to State , use 0 as default for points and rank
-        let instance = borrow_global_mut<State>(@admin);
+        let instance = borrow_global_mut<State>(get_resource_account_address());
         let next_team_id = vector::length(&instance.team_list);
         let team = Team {
             id: next_team_id,
@@ -243,7 +258,7 @@ module rtmtree::foot_fantasy {
         //      3. update the team's rank
         //          if points are equal, consider the team with lower team_id as higher rank (the team is created earlier)
         //      4. emit AnnounceResultEvent event
-        let instance = borrow_global_mut<State>(@admin);
+        let instance = borrow_global_mut<State>(get_resource_account_address());
 
         //calculate and update points
         let i = 0;
@@ -347,15 +362,15 @@ module rtmtree::foot_fantasy {
         assert_reward_is_not_claimed(team_id);
 
         // TODO: Mark that this team is already claimed
-        let instance = borrow_global_mut<State>(@admin);
+        let instance = borrow_global_mut<State>(get_resource_account_address());
         let team = vector::borrow_mut(&mut instance.team_list, team_id);
         team.is_reward_claimed = true;
 
         // TODO: Get how much reward this team should get
         let reward = 0;
         let rank = team.rank;
-        if (rank >= 1 && rank <=10){
-            reward = REWARD_TOP10;
+        if (simple_map::contains_key(&instance.reward_mapper, &rank)){
+            reward = *simple_map::borrow(&instance.reward_mapper, &rank);
         };
 
         // TODO: Transfer reward if reward is more than 0
@@ -363,7 +378,7 @@ module rtmtree::foot_fantasy {
         // TODO: Emit ClaimRewardEvent event
         if (reward > 0){
             let resource_signer = &account::create_signer_with_capability(&instance.cap);
-            assert_contract_has_enought_apt(signer::address_of(resource_signer),REWARD_TOP10);
+            assert_contract_has_enought_apt(signer::address_of(resource_signer), reward);
 
             coin::transfer<AptosCoin>(resource_signer, signer::address_of(account), reward);
             event::emit_event(
@@ -376,7 +391,68 @@ module rtmtree::foot_fantasy {
                 )
             );
         };
+    }
 
+    public fun set_reward_rank_list(
+        admin: &signer,
+        // reward_mapper: SimpleMap<u64,u64>,
+        rank_list: vector<u64>,
+        reward_list: vector<u64>
+    ) acquires State {
+        assert_signer_is_admin(admin);
+        let instance = borrow_global_mut<State>(get_resource_account_address());
+        assert_vectors_have_equal_length<u64, u64>(&rank_list, &reward_list);
+        let i = 0;
+        while (i < vector::length(&rank_list)) {
+            let rank = vector::borrow(&rank_list, i);
+            let reward = vector::borrow(&reward_list, i);
+            simple_map::upsert(&mut instance.reward_mapper, *move rank, *move reward);
+            i = move i + 1;
+        };
+    }
+
+    /////////////////////////////
+    // VIEWS //// DO NOT EDIT ///
+    /////////////////////////////
+
+     #[view]
+    public fun get_resource_account_address(): address {
+        let resource_account_address = account::create_resource_address(&@admin, SEED);
+        resource_account_address
+    }
+
+    #[view]
+    public fun get_team_price(): u64 acquires State {
+        let instance = borrow_global_mut<State>(get_resource_account_address());
+        instance.ticket_price
+    }
+
+    #[view]
+    public fun get_player_names(): vector<vector<u8>>  {
+        PLAYER_NAMES
+    }
+
+    #[view]
+    public fun get_point_by_team_id(id : u64): u64 acquires State {
+        let instance = borrow_global_mut<State>(get_resource_account_address());
+        vector::borrow(&instance.team_list, move id).points
+    }
+
+    #[view]
+    public fun get_rank_by_team_id(id : u64): u64 acquires State {
+        let instance = borrow_global_mut<State>(get_resource_account_address());
+        vector::borrow(&instance.team_list, move id).rank
+    }
+
+    #[view]
+    public fun get_reward(id : u64): u64 acquires State {
+        let instance = borrow_global_mut<State>(get_resource_account_address());
+        let rank = vector::borrow(&instance.team_list, move id).rank;
+        if (simple_map::contains_key(&instance.reward_mapper, &rank)){
+            *simple_map::borrow(&instance.reward_mapper, &rank)
+        } else {
+            0
+        }
     }
 
     ///////////////////////////
@@ -390,12 +466,12 @@ module rtmtree::foot_fantasy {
 
     inline fun assert_state_initialized() {
         // TODO: Assert that State resource exists at the admin address
-        assert!(exists<State>(@admin), ERROR_STATE_NOT_INITIALIZED);
+        assert!(exists<State>(get_resource_account_address()), ERROR_STATE_NOT_INITIALIZED);
     }
 
     inline fun assert_player_exists(player_id: u64) acquires State {
         // TODO: Assert that player_list in State has length more than player_id
-        let instance = borrow_global_mut<State>(@admin);
+        let instance = borrow_global_mut<State>(get_resource_account_address());
         assert!(vector::length(&instance.player_list) > move player_id, ERROR_PLAYER_DOES_NOT_EXIST);
     }
 
@@ -413,19 +489,19 @@ module rtmtree::foot_fantasy {
 
     inline fun assert_result_not_announced() acquires State {
         // TODO: Assert that is_result_announced in State is false
-        let instance = borrow_global_mut<State>(@admin);
+        let instance = borrow_global_mut<State>(get_resource_account_address());
         assert!(!instance.is_result_announced, ERROR_RESULT_ALREADY_ANNOUNCED);
     }
 
     inline fun assert_result_is_announced() acquires State {
         // TODO: Assert that is_result_announced in State is false
-        let instance = borrow_global_mut<State>(@admin);
+        let instance = borrow_global_mut<State>(get_resource_account_address());
         assert!(instance.is_result_announced, ERROR_RESULT_IS_NOT_ANNOUNCED);
     }
 
     inline fun assert_reward_is_not_claimed(team_id: u64) acquires State {
         // TODO: Assert that is_reward_claimed of this team_id is false
-        let instance = borrow_global_mut<State>(@admin);
+        let instance = borrow_global_mut<State>(get_resource_account_address());
         assert!(!vector::borrow(&instance.team_list, move team_id).is_reward_claimed, ERROR_REWARD_IS_ALREADY_CLAIMED);
     }
 
@@ -443,7 +519,7 @@ module rtmtree::foot_fantasy {
         let admin = account::create_account_for_test(@admin);
         init(&admin);
 
-        let state = borrow_global<State>(@admin);
+        let state = borrow_global<State>(get_resource_account_address());
         assert!(vector::borrow(&state.player_list, 0).id == 0, 0);
         assert!(vector::borrow(&state.player_list, 0).name == b"Salah", 1);
         assert!(vector::borrow(&state.player_list, 1).id == 1, 2);
@@ -475,7 +551,7 @@ module rtmtree::foot_fantasy {
         let player3_id = 2;
         create_team(&account, player1_id, player2_id, player3_id);
 
-        let state = borrow_global<State>(@admin);
+        let state = borrow_global<State>(get_resource_account_address());
         assert!(vector::length(&state.team_list) == 1,0);
         assert!(vector::borrow(&state.team_list, 0).id == 0,1);
         assert!(vector::borrow(&state.team_list, 0).player1_id == 0,1);
@@ -555,7 +631,7 @@ module rtmtree::foot_fantasy {
         let player3_id = 5;
         create_team(&account, player1_id, player2_id, player3_id);
 
-        let state = borrow_global<State>(@admin);
+        let state = borrow_global<State>(get_resource_account_address());
         assert!(vector::length(&state.team_list) == 4,0);
         assert!(vector::borrow(&state.team_list, 0).id == 0,1);
         assert!(vector::borrow(&state.team_list, 0).player1_id == 0,2);
@@ -623,7 +699,7 @@ module rtmtree::foot_fantasy {
         ];
         announce_with_stats(&admin, player_goals, player_assists);
 
-        let state = borrow_global<State>(@admin);
+        let state = borrow_global<State>(get_resource_account_address());
         assert!(vector::length(&state.team_list) == 4, 0);
         assert!(vector::borrow(&state.team_list, 0).points == 18, 1);
         assert!(vector::borrow(&state.team_list, 1).points == 9, 2);
@@ -716,7 +792,7 @@ module rtmtree::foot_fantasy {
         ];
         announce_with_stats(&admin, player_goals, player_assists);
 
-        let state = borrow_global<State>(@admin);
+        let state = borrow_global<State>(get_resource_account_address());
         assert!(event::counter(&state.events.announce_result_events) == 1, 10);
     }
 
@@ -837,9 +913,23 @@ module rtmtree::foot_fantasy {
 
         announce_with_stats(&admin, player_goals, player_assists);
 
+
+        let state = borrow_global<State>(get_resource_account_address());
+        //rank team 3
+        let team = vector::borrow(&state.team_list, 3);
+        let rank = team.rank;
+        //set rank reward 
+        let rank_list = vector::empty();
+        vector::push_back(&mut rank_list, rank);
+        let reward_list = vector::empty();
+        vector::push_back(&mut reward_list, 100);
+        set_reward_rank_list(&admin, rank_list, reward_list);
+
+        let reward = get_reward(3);
+
         claim_reward(&account,3);
-        assert!(coin::balance<AptosCoin>(signer::address_of(&account)) == REWARD_TOP10, 0);
-        let state = borrow_global<State>(signer::address_of(&admin));
+        assert!(coin::balance<AptosCoin>(signer::address_of(&account)) == reward, 0);
+        let state = borrow_global<State>(get_resource_account_address());
         assert!(event::counter(&state.events.claim_reward_events) == 1, 0);
     }
 
@@ -855,7 +945,17 @@ module rtmtree::foot_fantasy {
         init(&admin);
 
         let resource_signer_address = account::create_resource_address(&signer::address_of(&admin),SEED);
-        aptos_coin::mint(&aptos_framework, resource_signer_address, REWARD_TOP10 * 10);
+        let state = borrow_global<State>(get_resource_account_address());
+        let total_reward = 0;
+        let (reward_mapper_keys,reward_mapper_values) = simple_map::to_vec_pair<u64,u64>(state.reward_mapper);
+        let i = 0;
+        while (i < vector::length(&reward_mapper_keys)){
+            total_reward = total_reward + *vector::borrow(&reward_mapper_values, i);
+
+            i = i + 1;
+        };
+
+        aptos_coin::mint(&aptos_framework, resource_signer_address, total_reward);
         coin::destroy_burn_cap(burn_cap);
         coin::destroy_mint_cap(mint_cap);
 
@@ -988,7 +1088,7 @@ module rtmtree::foot_fantasy {
 
         claim_reward(&not_win_account,10);
         assert!(coin::balance<AptosCoin>(signer::address_of(&not_win_account)) == 0, 0);
-        let state = borrow_global<State>(signer::address_of(&admin));
+        let state = borrow_global<State>(get_resource_account_address());
         assert!(event::counter(&state.events.claim_reward_events) == 0, 0);
     }
 
